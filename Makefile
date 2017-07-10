@@ -1,5 +1,5 @@
 encode: encode.scm crc.so
-	csc encode.scm
+	csc -O3 -inline -k -specialize encode.scm
 
 crc.so: crc.scm
 	csc -s -j crc crc.scm `pkg-config --cflags --libs zlib`

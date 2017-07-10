@@ -1,42 +1,35 @@
-(use extras
-     srfi-4
-     lolevel
-     crc
-     zlib)
+(module encode
+  (make-image/data write-png-image)
+  (import scheme chicken)
+
+(use extras lolevel crc zlib)
 
 (define-record-type <image>
-  (%make-image
-    width
-    height
-    format
-    data)
-
+  (%make-image width height format data) 
   image?
+  (width image-width)
+  (height image-height)
+  (format image-format)
+  (data image-data))
 
-  (width image-width set-image-width!)
-  (height image-height set-image-height!)
-  (format image-format set-image-format!)
-  (data image-data set-image-data!))
-
-(define (write-short value port)
-  (write-byte (fxshr value 8) port)
-  (write-byte (fxand value 255) port))
-
-(define (write-long value port)
+(define-inline (write-long value port)
   (write-byte (fxand (fxshr value 24) 255) port)
   (write-byte (fxand (fxshr value 16) 255) port)
   (write-byte (fxand (fxshr value 8) 255) port)
   (write-byte (fxand value 255) port))
 
+(define (fxabs x)
+  (##core#inline "C_fixnum_abs" x))
+
+(define-constant *format-pixel-size*
+  '((rgb      . 3)
+    (rgba     . 4)
+    (gray     . 1)
+    (paletted . 1)))
+
 ;; Returns #t if 'fmt' is a valid color-format
 (define (image-format? fmt)
-  (if (memq fmt '(rgb rgba gray paletted)) #t #f))
-
-(define *format-pixel-size*
-  '((rgb . 3)
-    (rgba . 4)
-    (gray . 1)
-    (paletted . 1)))
+  (and (assq fmt *format-pixel-size*) #t))
 
 (define (image-format-to-pixel-size format)
   (cdr (assq format *format-pixel-size*)))
@@ -53,22 +46,26 @@
 
 (define (make-image/data width height fmt data)
   ;; Validate the parameters
-  (unless (and (>= width 0) (>= height 0) (image-format? fmt) (u8vector? data)
-               (= (u8vector-length data) (image-data-size width height fmt)))
-    (error "Incorrect parameters"))
-  (%make-image width height fmt data))
+  (cond ((or (< width 0) (< height 0))
+         (error "Image dimensions must be positive"))
+        ((not (image-format? fmt))
+         (error "Image format is invalid" fmt))
+        ((and data (not (blob? data)))
+         (error "Image data must be a blob"))
+        (else
+          (%make-image width height fmt data))))
 
-(define (write-chunk port ident #!optional data)
-  (if (eq? data #f)
-      (begin
-        (write-long 0 port)
-        (write-string ident 4 port)
-        (write-long (crc32 ident) port))
+(define (write-chunk port ident data)
+  (if data
       (let ((data-size (string-length data)))
         (write-long data-size port)
         (write-string ident 4 port)
         (write-string data data-size port)
-        (write-long (crc32 ident data) port))))
+        (write-long (crc32 ident data) port))
+      (begin
+        (write-long 0 port)
+        (write-string ident 4 port)
+        (write-long (crc32 ident) port))))
 
 (define (write-ihdr-chunk port image)
   (let* ((format (image-format image))
@@ -90,72 +87,76 @@
     (write-chunk port "IHDR" (get-output-string buf-port))))
 
 (define (write-iend-chunk port image)
-  (write-chunk port "IEND"))
+  (write-chunk port "IEND" #f))
 
-(define (filter-image image method)
+(define (filter-image image)
   (let* ((pixel-size (image-format-to-pixel-size (image-format image)))
-         (row-size (* (image-width image) pixel-size))
-         (new-size (* (image-height image) (add1 row-size)))
-         (out (make-u8vector new-size))
+         (row-size (fx* (image-width image) pixel-size))
+         (new-size (fx* (image-height image) (add1 row-size)))
+         (out (make-blob new-size))
          (data (image-data image)))
-    (case method
-      ((none)
-       (let lp ((l 0) (out-pos 0) (in-pos 0))
-         (when (< l (image-height image))
-           (u8vector-set! out out-pos 0) ; Filter type 0 = none
-           (move-memory! data out row-size in-pos (add1 out-pos))
-           (lp (add1 l) (+ out-pos (add1 row-size)) (+ in-pos row-size)))))
+    ;; Convenience functions to access the pixel data
+    (define-inline (this)
+      (##sys#byte data (fx+ in-pos x)))
+    (define-inline (left)
+      (if (fx< x pixel-size) 0 (##sys#byte data (fx- (fx+ in-pos x) pixel-size))))
+    ;; XXX: We can exploit the fact that line-buf holds the previous scanline
+    (define-inline (above)
+      (if (fx= line 0) 0 (##sys#byte data (fx- (fx+ in-pos x) row-size))))
+    (define-inline (upper-left)
+      (if (fx= line 0) 0
+          (if (fx< x pixel-size) 0
+              (##sys#byte data (fx- (fx- (fx+ in-pos x) row-size) pixel-size)))))
+    ;; Paeth predictor
+    (define-inline (paeth a b c)
+      (let* ((p  (fx- (fx+ a b) c))
+             (pa (fxabs (fx- p a)))
+             (pb (fxabs (fx- p b)))
+             (pc (fxabs (fx- p c))))
+        (cond ((and (fx<= pa pb) (fx<= pa pc)) a)
+              ((fx<= pb pc) b)
+              (else c))))
+    ;; Filter a single scanline and put the result in line-buf
+    (define (filter-line! line method in-pos line-buf)
+      (case method
+        ((0) ;; None
+         (move-memory! data line-buf row-size in-pos 0))
+        ((1) ;; Sub
+         (do ((x 0 (fx+ x 1))) ((fx= x row-size))
+           (##sys#setbyte line-buf x
+            (fxand 255 (fx- (this) (left))))))
+        ((2) ;; Up
+         (do ((x 0 (fx+ x 1))) ((fx= x row-size))
+           (##sys#setbyte line-buf x
+            (fxand 255 (fx- (this) (above))))))
+        ((3) ;; Average
+         (do ((x 0 (fx+ x 1))) ((fx= x row-size))
+           (##sys#setbyte line-buf x
+            (fxand 255 (fx- (this) (fxshr (fx+ (left) (above)) 1))))))
+        ((4) ;; Paeth
+         (do ((x 0 (fx+ x 1))) ((fx= x row-size))
+           (##sys#setbyte line-buf x
+            (fxand 255 (fx- (this) (paeth (left) (above) (upper-left)))))))
+        (else
+          (error "Invalid method"))))
 
-      ((up)
-       (let lp ((l 0) (out-pos 0) (in-pos 0))
-         (when (< l (image-height image))
-           (u8vector-set! out out-pos 2) ; Filter type 2 = up
-           (set! out-pos (add1 out-pos))
-
-           (if (= l 0)
-               (begin
-                 (move-memory! data out row-size in-pos out-pos)
-                 (set! out-pos (+ out-pos row-size))
-                 (set! in-pos (+ in-pos row-size)))
-
-           (let lp ((j 0))
-             (when (< j row-size)
-               (let ((up (u8vector-ref data (- in-pos row-size)))
-                     (this (u8vector-ref data in-pos)))
-                 (u8vector-set! out out-pos (fxand (fx- this up) 255))
-                 (set! out-pos (add1 out-pos))
-                 (set! in-pos (add1 in-pos))
-                 (lp (add1 j))))))
-
-           (lp (add1 l) out-pos in-pos))))
-
-      ((sub)
-       (let lp ((l 0) (out-pos 0) (in-pos 0))
-         (when (< l (image-height image))
-             (u8vector-set! out out-pos 1) ; Filter type 1 = sub
-             (set! out-pos (add1 out-pos))
-
-             (let lp ((j 0))
-               (when (< j row-size)
-                 (if (< j pixel-size)
-                     (u8vector-set! out out-pos (u8vector-ref data in-pos))
-                     (let ((this (u8vector-ref data in-pos))
-                           (prev (u8vector-ref data (- in-pos pixel-size))))
-                       (u8vector-set! out out-pos (fxand (fx- this prev) 255))))
-                 (set! out-pos (add1 out-pos))
-                 (set! in-pos (add1 in-pos))
-                 (lp (add1 j))))
-
-             (lp (add1 l) out-pos in-pos))))
-      (else (error "Unknown filter method")))
+    (let ((line-buf (make-blob row-size))
+          (scanlines (image-height image)))
+      (let loop ((line 0) (in-pos 0) (out-pos 0))
+        (when (fx< line scanlines)
+          (let ((filter (random 4)))
+            (filter-line! line filter in-pos line-buf)
+            (##sys#setbyte out out-pos filter)
+            (move-memory! line-buf out row-size 0 (fx+ 1 out-pos))
+            (loop (fx+ line 1) (fx+ in-pos row-size) (fx+ out-pos (fx+ row-size 1)))))))
     out))
 
 (define (write-idat-chunk port image)
-  (let* ((filtered-buf (filter-image image 'up))
+  (let* ((filtered-buf (filter-image image))
          (out (open-output-string))
          (zout (open-zlib-compressed-output-port out)))
-    ;; The zlib egg doesn't like 'write-u8vector'
-    (write-string (blob->string (u8vector->blob/shared filtered-buf)) #f zout)
+    ;; The zlib egg doesn't like blobs...
+    (write-string (blob->string filtered-buf) #f zout)
     (close-output-port zout)
     ;; Write the IDAT chunk after compressing the data
     (let* ((compressed-buf (get-output-string out))
@@ -163,36 +164,41 @@
       (write-chunk port "IDAT" (get-output-string out)))))
 
 (define (write-png-image port image)
-  (write-u8vector #u8(137 80 78 71 13 10 26 10) port)
+  (write-string "\x89\x50\x4e\x47\x0d\x0a\x1a\x0a" #f port)
   (write-ihdr-chunk port image)
   (write-idat-chunk port image)
   (write-iend-chunk port image))
+)
+
+(import encode)
 
 ; Output a good old xor-pattern
 (define (make-test-data width height)
-  (let ((out (make-u8vector (* width height))))
+  (let ((out (make-blob (* width height))))
     (let lp ((i 0))
       (when (< i height)
         (let lp ((j 0))
           (when (< j width)
-            (u8vector-set! out (+ (* i width) j) (fxand (fxxor i j) 255))
+            (##sys#setbyte out (+ (* i width) j) (fxand (fxxor i j) 255))
             (lp (add1 j))))
         (lp (add1 i))))
     out))
 
 (define (make-test-data/color width height)
-  (let ((out (make-u8vector (* 3 width height))))
+  (let ((out (make-blob (* 3 width height))))
     (let lp ((i 0))
       (when (< i height)
         (let lp ((j 0))
           (when (< j width)
-            (u8vector-set! out (+ (* i width 3) (* j 3)) (fxand (fxxor i j) 255))
-            (u8vector-set! out (+ (* i width 3) (* j 3) 1) (fxand (fxxor i j) 255))
-            (u8vector-set! out (+ (* i width 3) (* j 3) 2) (fxand (fxxor i j) 255))
+            (##sys#setbyte out (+ (* i width 3) (* j 3))   (fx- 255 (fxxor i j)))
+            (##sys#setbyte out (+ (* i width 3) (* j 3) 1) (fxand #x55 (fxxor i j)))
+            (##sys#setbyte out (+ (* i width 3) (* j 3) 2) (fxand #xaa (fxxor i j)))
             (lp (add1 j))))
         (lp (add1 i))))
     out))
 
-(let ((image (make-image/data 128 128 'rgb (make-test-data/color 128 128)))
-      (file (open-output-file "test.png")))
-  (write-png-image file image))
+(let* ((width 128)
+       (height width)
+       (image (make-image/data width height 'rgb (make-test-data/color width height)))
+       (file (open-output-file "test.png")))
+  (time (write-png-image file image)))
