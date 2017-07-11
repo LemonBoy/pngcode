@@ -3,15 +3,12 @@
 
 (foreign-declare "#include <zlib.h>")
 
-(define (crc32-update crc str)
-  ((foreign-lambda* unsigned-int32
-     ((unsigned-int32 init) (blob str) (unsigned-int str_length))
-     "C_return(crc32(init, str, str_length));")
-   crc str (string-length str)))
+(define crc32-update
+  (foreign-lambda* unsigned-int32 ((unsigned-int32 init) (scheme-object x))
+    "C_return(crc32(init, C_data_pointer(x), C_header_size(x)));"))
 
 ;; Calculate the CRC32 of the xs objects
 (define (crc32 . xs)
-  (when (null? xs) 0)
   (let lp ((crc 0) (rest xs))
     (if (null? rest)
         crc

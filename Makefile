@@ -1,8 +1,11 @@
-encode: encode.scm crc.so
-	csc -O3 -inline -k -specialize encode.scm
+writepng: writepng.scm encode.so
+	csc writepng.scm
+
+encode.so: encode.scm crc.so
+	csc -O3 -inline -specialize -k -s -j encode encode.scm
 
 crc.so: crc.scm
-	csc -s -j crc crc.scm `pkg-config --cflags --libs zlib`
+	csc -O3 -k -s -j crc crc.scm `pkg-config --cflags --libs zlib`
 
 clean:
-	rm *.so encode
+	rm *.so writepng

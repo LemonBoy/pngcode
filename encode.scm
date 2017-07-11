@@ -1,16 +1,18 @@
 (module encode
-  (make-image/data write-png-image)
+  (make-image/data image-width image-height image-format image-depth image-data
+   write-png-image)
   (import scheme chicken)
 
 (use extras lolevel crc zlib)
 
 (define-record-type <image>
-  (%make-image width height format data) 
+  (%make-image width height format depth data) 
   image?
-  (width image-width)
+  (width  image-width)
   (height image-height)
   (format image-format)
-  (data image-data))
+  (depth  image-depth)
+  (data   image-data))
 
 (define-inline (write-long value port)
   (write-byte (fxand (fxshr value 24) 255) port)
@@ -21,39 +23,63 @@
 (define (fxabs x)
   (##core#inline "C_fixnum_abs" x))
 
-(define-constant *format-pixel-size*
-  '((rgb      . 3)
-    (rgba     . 4)
-    (gray     . 1)
-    (paletted . 1)))
+; Valid image formats, the first element is the colour type as stored in the
+; IHDR, following that there's number of components and the rest are the allowed
+; bit depths
+(define-constant +valid-formats+
+  '((grey       0 1 1 2 4 8 16)
+    (rgb        2 3       8 16)
+    (index      3 1 1 2 4 8   )
+    (grey+alpha 4 2       8 16)
+    (rgb+alpha  6 4       8 16)))
 
-;; Returns #t if 'fmt' is a valid color-format
-(define (image-format? fmt)
-  (and (assq fmt *format-pixel-size*) #t))
+;; Returns #t if 'fmt' is a valid color-format/depth combo
+(define (image-format? fmt depth)
+  (cond ((assq fmt +valid-formats+)
+         => (lambda (x) (and (memq depth (cdddr x)) #t)))
+        (else #f)))
 
-(define (image-format-to-pixel-size format)
-  (cdr (assq format *format-pixel-size*)))
+;; Size of a pixel, used for filering
+(define (format-pixel-size fmt depth)
+  (cond ((assq fmt +valid-formats+)
+         => (lambda (x) (fx/ (fx+ (fx* (caddr x) depth) 7) 8)))
+        (else
+          (error "Invalid format specified" fmt))))
 
-(define (image-format-to-bpp format)
-  (case format
-    ((rgb rgba gray paletted) 8)
-    (else (error "Invalid image format"))))
+;; Size of a row, in bytes
+;; XXX: watch out for overflow!
+(define (format-row-size width fmt depth)
+  (let ((components (caddr (assq fmt +valid-formats+))))
+    (fx/ (fx+ (fx* (fx* width components) depth) 7) 8)))
 
-;; Returns the image size (in bytes) that the image blob takes for the given
-;; parameters
-(define (image-data-size width height fmt)
-  (* width (image-format-to-pixel-size fmt) height))
+(define (format-ihdr-type fmt)
+  (cond ((assq fmt +valid-formats+) => cadr)
+        (else 
+          (error "Invalid format specified" fmt))))
 
-(define (make-image/data width height fmt data)
+;; Returns the raw image data size in bytes
+;; XXX: watch out for overflow!
+(define (image-data-size width height fmt depth)
+  (fx* height (format-row-size width fmt depth)))
+
+(define (make-image/data width height fmt depth data)
   ;; Validate the parameters
-  (cond ((or (< width 0) (< height 0))
+  (##sys#check-exact width 'make-image/data)
+  (##sys#check-exact height 'make-image/data)
+  (##sys#check-exact depth 'make-image/data)
+  (cond ((or (<= width 0) (<= height 0))
          (error "Image dimensions must be positive"))
-        ((not (image-format? fmt))
-         (error "Image format is invalid" fmt))
+        ((not (image-format? fmt depth))
+         (error "Image format is invalid" fmt depth))
         ((and data (not (blob? data)))
          (error "Image data must be a blob"))
+        ((and-let* ((data)
+                    (got (blob-size data))
+                    (expected (image-data-size width height fmt depth))
+                    ((not (fx= got expected))))
+           (error "Image data has the wrong size" expected got)))
         (else
-          (%make-image width height fmt data))))
+          (%make-image width height fmt depth data))))
 
 (define (write-chunk port ident data)
   (if data
@@ -68,18 +94,13 @@
         (write-long (crc32 ident) port))))
 
 (define (write-ihdr-chunk port image)
-  (let* ((format (image-format image))
-         (color-type (case format
-                       ((gray gray16) 0)
-                       ((rgb) 2)
-                       ((rgba rgba64) 6)
-                       ((paletted) 3)))
+  (let* ((fmt (image-format image))
          (buf-port (open-output-string)))
     ; Assemble the IHDR
     (write-long (image-width image) buf-port)
     (write-long (image-height image) buf-port)
-    (write-byte (image-format-to-bpp format) buf-port)
-    (write-byte color-type buf-port)
+    (write-byte (image-depth image) buf-port)
+    (write-byte (format-ihdr-type fmt) buf-port)
     (write-byte 0 buf-port)
     (write-byte 0 buf-port)
     (write-byte 0 buf-port)
@@ -90,8 +111,8 @@
   (write-chunk port "IEND" #f))
 
 (define (filter-image image)
-  (let* ((pixel-size (image-format-to-pixel-size (image-format image)))
-         (row-size (fx* (image-width image) pixel-size))
+  (let* ((pixel-size (format-pixel-size (image-format image) (image-depth image)))
+         (row-size (format-row-size (image-width image) (image-format image) (image-depth image)))
          (new-size (fx* (image-height image) (add1 row-size)))
          (out (make-blob new-size))
          (data (image-data image)))
@@ -100,7 +121,6 @@
       (##sys#byte data (fx+ in-pos x)))
     (define-inline (left)
       (if (fx< x pixel-size) 0 (##sys#byte data (fx- (fx+ in-pos x) pixel-size))))
-    ;; XXX: We can exploit the fact that line-buf holds the previous scanline
     (define-inline (above)
       (if (fx= line 0) 0 (##sys#byte data (fx- (fx+ in-pos x) row-size))))
     (define-inline (upper-left)
@@ -164,41 +184,9 @@
       (write-chunk port "IDAT" (get-output-string out)))))
 
 (define (write-png-image port image)
+  (##sys#check-output-port port #t 'write-png-image)
   (write-string "\x89\x50\x4e\x47\x0d\x0a\x1a\x0a" #f port)
   (write-ihdr-chunk port image)
   (write-idat-chunk port image)
   (write-iend-chunk port image))
 )
-
-(import encode)
-
-; Output a good old xor-pattern
-(define (make-test-data width height)
-  (let ((out (make-blob (* width height))))
-    (let lp ((i 0))
-      (when (< i height)
-        (let lp ((j 0))
-          (when (< j width)
-            (##sys#setbyte out (+ (* i width) j) (fxand (fxxor i j) 255))
-            (lp (add1 j))))
-        (lp (add1 i))))
-    out))
-
-(define (make-test-data/color width height)
-  (let ((out (make-blob (* 3 width height))))
-    (let lp ((i 0))
-      (when (< i height)
-        (let lp ((j 0))
-          (when (< j width)
-            (##sys#setbyte out (+ (* i width 3) (* j 3))   (fx- 255 (fxxor i j)))
-            (##sys#setbyte out (+ (* i width 3) (* j 3) 1) (fxand #x55 (fxxor i j)))
-            (##sys#setbyte out (+ (* i width 3) (* j 3) 2) (fxand #xaa (fxxor i j)))
-            (lp (add1 j))))
-        (lp (add1 i))))
-    out))
-
-(let* ((width 128)
-       (height width)
-       (image (make-image/data width height 'rgb (make-test-data/color width height)))
-       (file (open-output-file "test.png")))
-  (time (write-png-image file image)))
