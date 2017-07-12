@@ -3,7 +3,8 @@
    write-png-image)
   (import scheme chicken)
 
-(use extras lolevel crc zlib)
+(use ports extras lolevel zlib)
+(use crc zopfli)
 
 (define-record-type <image>
   (%make-image width height format depth data) 
@@ -20,6 +21,7 @@
   (write-byte (fxand (fxshr value 8) 255) port)
   (write-byte (fxand value 255) port))
 
+(: fxabs (procedure (fixnum) fixnum))
 (define (fxabs x)
   (##core#inline "C_fixnum_abs" x))
 
@@ -129,10 +131,9 @@
               (##sys#byte data (fx- (fx- (fx+ in-pos x) row-size) pixel-size)))))
     ;; Paeth predictor
     (define-inline (paeth a b c)
-      (let* ((p  (fx- (fx+ a b) c))
-             (pa (fxabs (fx- p a)))
-             (pb (fxabs (fx- p b)))
-             (pc (fxabs (fx- p c))))
+      (let* ((pa (fxabs (fx- b c)))
+             (pb (fxabs (fx- a c)))
+             (pc (fxabs (fx- (fx+ a b) (fxshl c 1)))))
         (cond ((and (fx<= pa pb) (fx<= pa pc)) a)
               ((fx<= pb pc) b)
               (else c))))
@@ -171,17 +172,19 @@
             (loop (fx+ line 1) (fx+ in-pos row-size) (fx+ out-pos (fx+ row-size 1)))))))
     out))
 
+(define (zlib-compress-blob blob)
+  (let* ((out (open-output-string))
+         (zport (open-zlib-compressed-output-port out)))
+    ; the zlib egg doesn't like blobs...
+    (write-string (blob->string blob) #f zport)
+    (close-output-port zport)
+    (get-output-string out)))
+
 (define (write-idat-chunk port image)
   (let* ((filtered-buf (filter-image image))
-         (out (open-output-string))
-         (zout (open-zlib-compressed-output-port out)))
-    ;; The zlib egg doesn't like blobs...
-    (write-string (blob->string filtered-buf) #f zout)
-    (close-output-port zout)
-    ;; Write the IDAT chunk after compressing the data
-    (let* ((compressed-buf (get-output-string out))
-           (compressed-len (string-length compressed-buf)))
-      (write-chunk port "IDAT" (get-output-string out)))))
+         ; (out (zopfli-compress-blob #f 'zlib filtered-buf))
+         (out (zlib-compress-blob filtered-buf)))
+    (write-chunk port "IDAT" out)))
 
 (define (write-png-image port image)
   (##sys#check-output-port port #t 'write-png-image)

@@ -8,6 +8,7 @@
     "C_return(crc32(init, C_data_pointer(x), C_header_size(x)));"))
 
 ;; Calculate the CRC32 of the xs objects
+(: crc32 (procedure crc32 (#!rest blob) number))
 (define (crc32 . xs)
   (let lp ((crc 0) (rest xs))
     (if (null? rest)
