@@ -1,14 +1,16 @@
-writepng: writepng.scm encode.so
-	csc writepng.scm
+CSC ?= csc
 
-encode.so: encode.scm crc.so zopfli.so
-	csc -C -O3 -O3 -inline -specialize -k -s -j encode encode.scm
+writepng: writepng.scm encode.so
+	$(CSC) writepng.scm
+
+encode.so: encode.scm zlib1.so zopfli.so
+	$(CSC) -C -O3 -O3 -inline -specialize -k -s -j encode encode.scm
 
 zopfli.so: zopfli.scm
-	csc -O3 -k -s -j zopfli -ot zopfli.types zopfli.scm -lzopfli
+	$(CSC) -O3 -k -s -j zopfli -ot zopfli.types zopfli.scm -lzopfli
 
-crc.so: crc.scm
-	csc -O3 -k -s -j crc -ot crc.types crc.scm `pkg-config --cflags --libs zlib`
+zlib1.so: zlib1.scm
+	$(CSC) -O3 -k -s -j zlib1 -ot zlib1.types zlib1.scm `pkg-config --cflags --libs zlib`
 
 clean:
 	rm *.so writepng

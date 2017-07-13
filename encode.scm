@@ -3,8 +3,8 @@
    write-png-image)
   (import scheme chicken)
 
-(use ports extras lolevel zlib)
-(use crc zopfli)
+(use ports extras lolevel)
+(use zlib1 zopfli)
 
 (define-record-type <image>
   (%make-image width height format depth data) 
@@ -85,10 +85,10 @@
 
 (define (write-chunk port ident data)
   (if data
-      (let ((data-size (string-length data)))
+      (let ((data-size (##sys#size data)))
         (write-long data-size port)
         (write-string ident 4 port)
-        (write-string data data-size port)
+        (write-string data #f port)
         (write-long (crc32 ident data) port))
       (begin
         (write-long 0 port)
@@ -172,18 +172,14 @@
             (loop (fx+ line 1) (fx+ in-pos row-size) (fx+ out-pos (fx+ row-size 1)))))))
     out))
 
-(define (zlib-compress-blob blob)
-  (let* ((out (open-output-string))
-         (zport (open-zlib-compressed-output-port out)))
-    ; the zlib egg doesn't like blobs...
-    (write-string (blob->string blob) #f zport)
-    (close-output-port zport)
-    (get-output-string out)))
-
 (define (write-idat-chunk port image)
   (let* ((filtered-buf (filter-image image))
-         ; (out (zopfli-compress-blob #f 'zlib filtered-buf))
-         (out (zlib-compress-blob filtered-buf)))
+         ; (ob (make-zopfli-options #f 5 #t 15))
+         ; (out (zopfli-compress ob 'zlib filtered-buf))
+         (out (zlib-compress 6 filtered-buf))
+         )
+    (unless out
+      (error "Something bad happened"))
     (write-chunk port "IDAT" out)))
 
 (define (write-png-image port image)
