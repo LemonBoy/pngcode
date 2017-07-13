@@ -30,6 +30,9 @@
 (define-type zopfli-format  symbol)
 (define-type zopfli-options pointer)
 
+; Static object holding the default options
+(define-location default_options "ZopfliOptions")
+
 (define zopfli-init-options
   (foreign-lambda void "ZopfliInitOptions" zopfli-options))
 
@@ -46,7 +49,7 @@
 (: zopfli-compress-blob (procedure ((or false zopfli-options) zopfli-format blob) string))
 (define (zopfli-compress-blob opt fmt blob)
   (set-finalizer!
-    (zopfli-compress (or opt default_options) fmt blob)
+    (zopfli-compress (or opt #$default_options) fmt blob)
     (lambda (obj) (free obj))))
 
 (define (open-zopfli-output-port sink)
@@ -60,10 +63,5 @@
         void)
       (lambda (_) (free-zopfli-options options)))))
 
-; (define-external default_options (struct "ZopfliOptions"))
-; (foreign-declare "static ZopfliOptions default_options;")
-; (define-foreign-variable default_options (struct "ZopfliOptions"))
-
-(define default_options (make-zopfli-options))
-(zopfli-init-options default_options)
+(zopfli-init-options #$default_options)
 )
