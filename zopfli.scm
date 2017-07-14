@@ -60,7 +60,7 @@
     "C_block_header_init(buf, C_make_header(C_STRING_TYPE, out));"
     "C_return(buf);"))
 
-(: zopfli-compress (procedure ((or false zopfli-options) zopfli-format blob) string))
+(: zopfli-compress (procedure ((or false zopfli-options) zopfli-format (or blob string)) string))
 (define (zopfli-compress opt fmt blob)
   (set-finalizer!
     (c-zopfli-compress (or opt #$default_options) fmt blob)

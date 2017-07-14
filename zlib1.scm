@@ -1,20 +1,16 @@
 (module zlib1
-  (crc32 zlib-compress)
+  (crc32 adler32 zlib-compress)
   (import chicken scheme lolevel foreign)
 
 (foreign-declare "#include <zlib.h>")
 
-(define crc32-update
+(define c-crc32
   (foreign-lambda* unsigned-int32 ((unsigned-int32 init) (scheme-object x))
     "C_return(crc32(init, C_data_pointer(x), C_header_size(x)));"))
 
-;; Calculate the CRC32 of the xs objects
-(: crc32 (procedure crc32 (#!rest blob) number))
-(define (crc32 . xs)
-  (let lp ((crc 0) (rest xs))
-    (if (null? rest)
-        crc
-        (lp (crc32-update crc (car rest)) (cdr rest)))))
+(define c-adler32
+  (foreign-lambda* unsigned-int32 ((unsigned-int32 init) (scheme-object x))
+    "C_return(adler32(init, C_data_pointer(x), C_header_size(x)));"))
 
 (define c-zlib-compress
   (foreign-lambda* scheme-object ((int level) (scheme-object in))
@@ -26,6 +22,15 @@
     "C_block_header_init(buf, C_make_header(C_STRING_TYPE, out_len));"
     "C_return(buf);"))
 
+(: crc32 (procedure crc32 (#!rest (or blob string)) number))
+(define (crc32 . xs)
+  (foldl c-crc32 0 xs))
+
+(: adler32 (procedure adler32 (#!rest (or blob string)) number))
+(define (adler32 . xs)
+  (foldl c-adler32 1 xs))
+
+(: zlib-compress (procedure zlib-compress (fixnum (or blob string)) string))
 (define (zlib-compress level in)
   (set-finalizer!
     (or (c-zlib-compress level in) (error "could not compress the buffer"))
