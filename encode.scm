@@ -43,10 +43,8 @@
 
 ;; Size of a pixel, used for filering
 (define (format-pixel-size fmt depth)
-  (cond ((assq fmt +valid-formats+)
-         => (lambda (x) (fx/ (fx+ (fx* (caddr x) depth) 7) 8)))
-        (else
-          (error "Invalid format specified" fmt))))
+  (let ((components (caddr (assq fmt +valid-formats+))))
+    (fx/ (fx+ (fx* components depth) 7) 8)))
 
 ;; Size of a row, in bytes
 ;; XXX: watch out for overflow!
@@ -55,9 +53,7 @@
     (fx/ (fx+ (fx* (fx* width components) depth) 7) 8)))
 
 (define (format-ihdr-type fmt)
-  (cond ((assq fmt +valid-formats+) => cadr)
-        (else 
-          (error "Invalid format specified" fmt))))
+  (cadr (assq fmt +valid-formats+)))
 
 ;; Returns the raw image data size in bytes
 ;; XXX: watch out for overflow!
@@ -115,7 +111,7 @@
 (define (filter-image image)
   (let* ((pixel-size (format-pixel-size (image-format image) (image-depth image)))
          (row-size (format-row-size (image-width image) (image-format image) (image-depth image)))
-         (new-size (fx* (image-height image) (add1 row-size)))
+         (new-size (fx* (image-height image) (fx+ 1 row-size)))
          (out (make-blob new-size))
          (data (image-data image)))
     ;; Convenience functions to access the pixel data
@@ -133,7 +129,7 @@
     (define-inline (paeth a b c)
       (let* ((pa (fxabs (fx- b c)))
              (pb (fxabs (fx- a c)))
-             (pc (fxabs (fx- (fx+ a b) (fxshl c 1)))))
+             (pc (fxabs (fx- (fx- (fx+ a b) c) c))))
         (cond ((and (fx<= pa pb) (fx<= pa pc)) a)
               ((fx<= pb pc) b)
               (else c))))
@@ -176,7 +172,7 @@
   (let* ((filtered-buf (filter-image image))
          ; (ob (make-zopfli-options #f 5 #t 15))
          ; (out (zopfli-compress ob 'zlib filtered-buf))
-         (out (zlib-compress 6 filtered-buf))
+         (out (zlib-compress -1 filtered-buf))
          )
     (unless out
       (error "Something bad happened"))
