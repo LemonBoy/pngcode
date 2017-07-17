@@ -1,5 +1,5 @@
 (module encode
-  (make-image/data image-width image-height image-format image-depth image-data
+  (make-image image-width image-height image-format image-depth image-data
    write-png-image)
   (import scheme chicken)
 
@@ -14,7 +14,7 @@
   (height image-height : fixnum)
   (format image-format : symbol)
   (depth  image-depth  : fixnum)
-  (data   image-data   : blob))
+  (data   image-data   : (or blob string)))
 
 (define-inline (write-long value port)
   (write-byte (fxand (fxshr value 24) 255) port)
@@ -61,21 +61,21 @@
 (define (image-data-size width height fmt depth)
   (fx* height (format-row-size width fmt depth)))
 
-(define (make-image/data width height fmt depth data)
+(: make-image (procedure make-image (fixnum fixnum symbol fixnum (or blob string)) (struct <image>)))
+(define (make-image width height fmt depth data)
   ;; Validate the parameters
   (##sys#check-exact width 'make-image/data)
   (##sys#check-exact height 'make-image/data)
   (##sys#check-exact depth 'make-image/data)
   (cond ((or (<= width 0) (<= height 0))
-         (error "Image dimensions must be positive"))
+         (error "Image dimensions must be greater than zero" width height))
         ((not (image-format? fmt depth))
          (error "Image format is invalid" fmt depth))
-        ((and data (not (blob? data)))
-         (error "Image data must be a blob"))
-        ((and-let* ((data)
-                    (got (blob-size data))
+        ((not (or (blob? data) (string? data)))
+         (error "Image data must be a blob or a string"))
+        ((and-let* ((got (##sys#size data))
                     (expected (image-data-size width height fmt depth))
-                    ((not (fx= got expected))))
+                    ((not (= got expected))))
            (error "Image data has the wrong size" expected got)))
         (else
           (%make-image width height fmt depth data))))
