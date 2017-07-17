@@ -4,16 +4,17 @@
   (import scheme chicken)
 
 (use ports extras lolevel)
+(use typed-records)
 (use zlib1 zopfli)
 
 (define-record-type <image>
   (%make-image width height format depth data) 
   image?
-  (width  image-width)
-  (height image-height)
-  (format image-format)
-  (depth  image-depth)
-  (data   image-data))
+  (width  image-width  : fixnum)
+  (height image-height : fixnum)
+  (format image-format : symbol)
+  (depth  image-depth  : fixnum)
+  (data   image-data   : blob))
 
 (define-inline (write-long value port)
   (write-byte (fxand (fxshr value 24) 255) port)
