@@ -8,15 +8,16 @@
 (use zlib1 zopfli)
 
 (define-record-type <image>
-  (%make-image width height format depth data) 
+  (%make-image width height format depth data palette)
   image?
-  (width  image-width  : fixnum)
-  (height image-height : fixnum)
-  (format image-format : symbol)
-  (depth  image-depth  : fixnum)
-  (data   image-data   : (or blob string)))
+  (width   image-width   : fixnum)
+  (height  image-height  : fixnum)
+  (format  image-format  : symbol)
+  (depth   image-depth   : fixnum)
+  (data    image-data    : (or blob string))
+  (palette image-palette : (or false (list-of fixnum))))
 
-(define-inline (write-long value port)
+(define-inline (write-long value #!optional (port (current-output-port)))
   (write-byte (fxand (fxshr value 24) 255) port)
   (write-byte (fxand (fxshr value 16) 255) port)
   (write-byte (fxand (fxshr value 8) 255) port)
@@ -61,12 +62,13 @@
 (define (image-data-size width height fmt depth)
   (fx* height (format-row-size width fmt depth)))
 
-(: make-image (procedure make-image (fixnum fixnum symbol fixnum (or blob string)) (struct <image>)))
-(define (make-image width height fmt depth data)
+(: make-image (procedure make-image (fixnum fixnum symbol fixnum (or blob string) (or false (list-of fixnum))) (struct <image>)))
+(define (make-image width height fmt depth data palette)
   ;; Validate the parameters
-  (##sys#check-exact width 'make-image/data)
-  (##sys#check-exact height 'make-image/data)
-  (##sys#check-exact depth 'make-image/data)
+  (##sys#check-exact width 'make-image)
+  (##sys#check-exact height 'make-image)
+  (##sys#check-exact depth 'make-image)
+  (when palette (##sys#check-list palette 'make-image))
   (cond ((or (<= width 0) (<= height 0))
          (error "Image dimensions must be greater than zero" width height))
         ((not (image-format? fmt depth))
@@ -77,8 +79,14 @@
                     (expected (image-data-size width height fmt depth))
                     ((not (= got expected))))
            (error "Image data has the wrong size" expected got)))
+        ((and (eq? fmt 'index) (not palette))
+         (error "You must specify a palette for this format" fmt))
+        ((and palette (or (= depth 16) (memq fmt '(grey grey+alpha))))
+         (error "Cannot specify a palette for this format" fmt))
+        ((and palette (< (fxshl 1 depth) (length palette)))
+         (error "Palette data has too many entries for this depth"))
         (else
-          (%make-image width height fmt depth data))))
+          (%make-image width height fmt depth data palette))))
 
 (define (write-chunk port ident data)
   (if data
@@ -93,21 +101,38 @@
         (write-long (crc32 ident) port))))
 
 (define (write-ihdr-chunk port image)
-  (let* ((fmt (image-format image))
-         (buf-port (open-output-string)))
-    ; Assemble the IHDR
-    (write-long (image-width image) buf-port)
-    (write-long (image-height image) buf-port)
-    (write-byte (image-depth image) buf-port)
-    (write-byte (format-ihdr-type fmt) buf-port)
-    (write-byte 0 buf-port)
-    (write-byte 0 buf-port)
-    (write-byte 0 buf-port)
-    ; Write it out
-    (write-chunk port "IHDR" (get-output-string buf-port))))
+  (write-chunk port "IHDR"
+    (with-output-to-string
+      (lambda ()
+        ; Width
+        (write-long (image-width image))
+        ; Height
+        (write-long (image-height image))
+        ; Bit depth
+        (write-byte (image-depth image))
+        ; Colour type
+        (write-byte (format-ihdr-type (image-format image)))
+        ; Compression method
+        (write-byte 0)
+        ; Filter method
+        (write-byte 0)
+        ; Interlace method
+        (write-byte 0)))))
 
 (define (write-iend-chunk port image)
   (write-chunk port "IEND" #f))
+
+(define (write-plte-chunk port image)
+  (and-let* ((palette (image-palette image)))
+    (write-chunk port "PLTE"
+      (with-output-to-string
+        (lambda ()
+          (for-each
+            (lambda (v)
+              (write-byte (fxand (fxshr v 16) 255))
+              (write-byte (fxand (fxshr v  8) 255))
+              (write-byte (fxand v 255)))
+            palette))))))
 
 (define (filter-image image)
   (let* ((pixel-size (format-pixel-size (image-format image) (image-depth image)))
@@ -158,6 +183,18 @@
         (else
           (error "Invalid method"))))
 
+    (define (sum-abs-values buf)
+      (let ((buf-size (##sys#size buf)))
+        (let loop ((x 0) (sum 0))
+          (if (fx< x buf-size)
+              (let ((byte (##sys#byte buf x)))
+                ;; As suggested by the RFC "Consider the output bytes as signed
+                ;; differences for this test"
+                (if (fx< byte 128)
+                    (loop (fx+ x 1) (fx+ sum byte))
+                    (loop (fx+ x 1) (fx+ sum (fx- 255 byte)))))
+              sum))))
+
     (let ((line-buf (make-blob row-size))
           (scanlines (image-height image)))
       (let loop ((line 0) (in-pos 0) (out-pos 0))
@@ -183,6 +220,7 @@
   (##sys#check-output-port port #t 'write-png-image)
   (write-string "\x89\x50\x4e\x47\x0d\x0a\x1a\x0a" #f port)
   (write-ihdr-chunk port image)
+  (write-plte-chunk port image)
   (write-idat-chunk port image)
   (write-iend-chunk port image))
 )
