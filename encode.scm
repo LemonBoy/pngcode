@@ -141,18 +141,18 @@
          (out (make-blob new-size))
          (data (image-data image)))
     ;; Convenience functions to access the pixel data
-    (define-inline (this)
+    (define (this data x in-pos)
       (##sys#byte data (fx+ in-pos x)))
-    (define-inline (left)
+    (define (left data x in-pos pixel-size)
       (if (fx< x pixel-size) 0 (##sys#byte data (fx- (fx+ in-pos x) pixel-size))))
-    (define-inline (above)
+    (define (above data x in-pos line row-size)
       (if (fx= line 0) 0 (##sys#byte data (fx- (fx+ in-pos x) row-size))))
-    (define-inline (upper-left)
+    (define (upper-left data x in-pos line row-size pixel-size)
       (if (fx= line 0) 0
           (if (fx< x pixel-size) 0
               (##sys#byte data (fx- (fx- (fx+ in-pos x) row-size) pixel-size)))))
     ;; Paeth predictor
-    (define-inline (paeth a b c)
+    (define (paeth a b c)
       (let* ((pa (fxabs (fx- b c)))
              (pb (fxabs (fx- a c)))
              (pc (fxabs (fx- (fx- (fx+ a b) c) c))))
@@ -167,19 +167,25 @@
         ((1) ;; Sub
          (do ((x 0 (fx+ x 1))) ((fx= x row-size))
            (##sys#setbyte line-buf x
-            (fxand 255 (fx- (this) (left))))))
+            (fxand 255 (fx- (this data x in-pos) (left data x in-pos pixel-size))))))
         ((2) ;; Up
          (do ((x 0 (fx+ x 1))) ((fx= x row-size))
            (##sys#setbyte line-buf x
-            (fxand 255 (fx- (this) (above))))))
+            (fxand 255 (fx- (this data x in-pos) (above data x in-pos line row-size))))))
         ((3) ;; Average
          (do ((x 0 (fx+ x 1))) ((fx= x row-size))
            (##sys#setbyte line-buf x
-            (fxand 255 (fx- (this) (fxshr (fx+ (left) (above)) 1))))))
+            (fxand 255 (fx- (this data x in-pos)
+                            (fxshr (fx+ (left data x in-pos pixel-size)
+                                        (above data x in-pos line row-size)) 1))))))
         ((4) ;; Paeth
          (do ((x 0 (fx+ x 1))) ((fx= x row-size))
            (##sys#setbyte line-buf x
-            (fxand 255 (fx- (this) (paeth (left) (above) (upper-left)))))))
+            (fxand 255
+              (fx- (this data x in-pos)
+                   (paeth (left data x in-pos pixel-size)
+                          (above data x in-pos line row-size)
+                          (upper-left data x in-pos line row-size pixel-size)))))))
         (else
           (error "Invalid method"))))
 

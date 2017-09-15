@@ -4,7 +4,7 @@ writepng: writepng.scm encode.so
 	$(CSC) writepng.scm
 
 encode.so: encode.scm zlib1.so zopfli.so
-	$(CSC) -C -O3 -O3 -inline -specialize -k -s -j encode encode.scm
+	$(CSC) -O3 -k -d1 -s -j encode -ot encode.types -C -O3 -inline -specialize encode.scm
 
 zopfli.so: zopfli.scm
 	$(CSC) -O3 -k -s -j zopfli -ot zopfli.types zopfli.scm -lzopfli
