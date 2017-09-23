@@ -186,37 +186,64 @@
                    (paeth (left data x in-pos pixel-size)
                           (above data x in-pos line row-size)
                           (upper-left data x in-pos line row-size pixel-size)))))))
+        ((-1) ;; Bogus
+         ;; XXX: This is needed to stop the compiler from inlining the `paeth`
+         ;; and `upper-left` procedures above since the resulting loop is slower
+         ;; and allocates memory
+         (paeth 0 0 0)
+         (upper-left 0 0 0 0 0 0))
         (else
           (error "Invalid method"))))
 
-    (define (sum-abs-values buf)
-      (let ((buf-size (##sys#size buf)))
-        (let loop ((x 0) (sum 0))
-          (if (fx< x buf-size)
-              (let ((byte (##sys#byte buf x)))
-                ;; As suggested by the RFC "Consider the output bytes as signed
-                ;; differences for this test"
-                (if (fx< byte 128)
-                    (loop (fx+ x 1) (fx+ sum byte))
-                    (loop (fx+ x 1) (fx+ sum (fx- 255 byte)))))
-              sum))))
+    (define (sum-abs-values buf from size)
+      (let loop ((x from) (d 0) (sum 0))
+        (if (fx< d size)
+            (let ((byte (##sys#byte buf x)))
+              ;; As suggested by the RFC "Consider the output bytes as signed
+              ;; differences for this test"
+              (if (fx< byte 128)
+                  (loop (fx+ x 1) (fx+ d 1) (fx+ sum byte))
+                  (loop (fx+ x 1) (fx+ d 1) (fx+ sum (fx- 255 byte)))))
+            sum)))
 
-    (let ((line-buf (make-blob row-size))
+    (let ((line-buf1 (make-blob row-size))
+          (line-buf2 (make-blob row-size))
+          (line-buf3 (make-blob row-size))
+          (line-buf4 (make-blob row-size))
           (scanlines (image-height image)))
-      (let loop ((line 0) (in-pos 0) (out-pos 0))
-        (when (fx< line scanlines)
-          (let ((filter (random 4)))
-            (filter-line! line filter in-pos line-buf)
-            (##sys#setbyte out out-pos filter)
-            (move-memory! line-buf out row-size 0 (fx+ 1 out-pos))
-            (loop (fx+ line 1) (fx+ in-pos row-size) (fx+ out-pos (fx+ row-size 1)))))))
+      (do ((line 0 (fx+ line 1))
+           (in-pos 0 (fx+ in-pos row-size))
+           (out-pos 0 (fx+ out-pos (fx+ row-size 1))))
+          ((fx= line scanlines))
+        ;; The base-case is the raw unfiltered scanline
+        (let ((base0 (sum-abs-values data in-pos row-size)))
+          ;; Try to find the best filtering option by applying them all and then
+          ;; checking which one gives the smallest sum
+          (filter-line! line 1 in-pos line-buf1)
+          (filter-line! line 2 in-pos line-buf2)
+          (filter-line! line 3 in-pos line-buf3)
+          (filter-line! line 4 in-pos line-buf4)
+
+          (let loop ((minsum base0) (filter 1) (best-buf #f) (best-filter 0)
+                     (xs (list line-buf1 line-buf2 line-buf3 line-buf4)))
+            (if (null? xs)
+                (begin
+                  ;; Each scanline begins with the filtering method used
+                  (##sys#setbyte out out-pos best-filter)
+                  (if (not best-buf)
+                      (move-memory! data out row-size in-pos (fx+ 1 out-pos))
+                      (move-memory! best-buf out row-size 0 (fx+ 1 out-pos))))
+                (let ((lsum (sum-abs-values (car xs) 0 row-size)))
+                  (if (fx< lsum minsum)
+                      (loop lsum (fx+ filter 1) (car xs) filter (cdr xs))
+                      (loop minsum (fx+ filter 1) best-buf best-filter (cdr xs)))))))))
     out))
 
 (define (write-idat-chunk port image)
   (let* ((filtered-buf (filter-image image))
          ; (ob (make-zopfli-options #f 5 #t 15))
          ; (out (zopfli-compress ob 'zlib filtered-buf))
-         (out (zlib-compress -1 filtered-buf))
+         (out (zlib-compress 9 filtered-buf))
          )
     (unless out
       (error "Something bad happened"))
